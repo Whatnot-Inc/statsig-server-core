@@ -1,0 +1,3 @@
+# When updating, modify defaults in Dockerfile
+erlang 27.3.4.2
+elixir 1.18.4-otp-27
