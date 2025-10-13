@@ -321,8 +321,8 @@ impl StatsigHttpSpecsAdapter {
                 // Try to peek at the data to see if it's actually empty
                 match data.read_to_string() {
                     Ok(content) => {
-                        let content_preview = if content.len() > 100 {
-                            format!("{}... ({} bytes total)", &content[..100], content.len())
+                        let content_preview = if content.len() > 500 {
+                            format!("{}... ({} bytes total)", &content[..500], content.len())
                         } else {
                             format!("{} ({} bytes)", content, content.len())
                         };

@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-const MAX_CHARS: usize = 400;
+const MAX_CHARS: usize = 4000;
 const TRUNCATED_SUFFIX: &str = "...[TRUNCATED]";
 
 const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Warn;
