@@ -100,6 +100,13 @@ impl NetworkProviderReqwest {
         };
         request = request.timeout(timeout_duration);
 
+        // Set Accept-Encoding header if gzip is accepted
+        // This tells the server we can handle compressed responses
+        // and enables reqwest's automatic decompression
+        if request_args.accept_gzip_response {
+            request = request.header("Accept-Encoding", "gzip, deflate, br");
+        }
+
         if let Some(headers) = &request_args.headers {
             for (key, value) in headers {
                 request = request.header(key, value);
