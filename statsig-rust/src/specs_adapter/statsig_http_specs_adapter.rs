@@ -9,7 +9,7 @@ use crate::statsig_metadata::StatsigMetadata;
 use crate::utils::get_api_from_url;
 use crate::DEFAULT_INIT_TIMEOUT_MS;
 use crate::{
-    log_d, log_e, log_error_to_statsig_and_console, SpecsSource, StatsigOptions, StatsigRuntime,
+    log_e, log_error_to_statsig_and_console, log_i, SpecsSource, StatsigOptions, StatsigRuntime,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -110,7 +110,7 @@ impl StatsigHttpSpecsAdapter {
         let request_args = self.get_request_args(&current_specs_info, trigger);
         let url = request_args.url.clone();
 
-        log_d!(
+        log_i!(
             TAG,
             "Fetching specs from network: url={}, trigger={:?}, lcut={:?}, checksum={:?}, retries={}, timeout_ms={}",
             url,
@@ -123,14 +123,19 @@ impl StatsigHttpSpecsAdapter {
 
         match self.handle_specs_request(request_args).await {
             Ok(response) => {
-                log_d!(TAG, "Successfully fetched specs from network: url={}", url);
+                log_i!(TAG, "Successfully fetched specs from network: url={}", url);
                 Ok(NetworkResponse {
                     data: response,
                     api: get_api_from_url(&url),
                 })
             }
             Err(e) => {
-                log_e!(TAG, "Failed to fetch specs from network: url={}, error={}", url, e);
+                log_e!(
+                    TAG,
+                    "Failed to fetch specs from network: url={}, error={}",
+                    url,
+                    e
+                );
                 Err(e)
             }
         }
@@ -199,7 +204,7 @@ impl StatsigHttpSpecsAdapter {
             }
         };
 
-        log_d!(
+        log_i!(
             TAG,
             "Attempting fallback request: original_url={}, fallback_url={}",
             original_url,
@@ -210,7 +215,7 @@ impl StatsigHttpSpecsAdapter {
 
         match self.handle_specs_request(request_args).await {
             Ok(response) => {
-                log_d!(
+                log_i!(
                     TAG,
                     "Fallback request succeeded: fallback_url={}",
                     fallback_url
@@ -238,19 +243,14 @@ impl StatsigHttpSpecsAdapter {
     ) -> Result<ResponseData, NetworkError> {
         let url = request_args.url.clone();
 
-        log_d!(TAG, "Making GET request to: {}", url);
+        log_i!(TAG, "Making GET request to: {}", url);
 
         let response = self.network.get(request_args).await.map_err(|e| {
-            log_e!(
-                TAG,
-                "Network GET request failed: url={}, error={}",
-                url,
-                e
-            );
+            log_e!(TAG, "Network GET request failed: url={}, error={}", url, e);
             e
         })?;
 
-        log_d!(
+        log_i!(
             TAG,
             "Received response: url={}, status_code={:?}, has_data={}",
             url,
@@ -260,7 +260,11 @@ impl StatsigHttpSpecsAdapter {
 
         match response.data {
             Some(data) => {
-                log_d!(TAG, "Successfully extracted data from response: url={}", url);
+                log_i!(
+                    TAG,
+                    "Successfully extracted data from response: url={}",
+                    url
+                );
                 Ok(data)
             }
             None => {
@@ -269,7 +273,12 @@ impl StatsigHttpSpecsAdapter {
                     response.status_code,
                     "No data in response".to_string(),
                 );
-                log_e!(TAG, "Response missing data: url={}, status_code={:?}", url, response.status_code);
+                log_e!(
+                    TAG,
+                    "Response missing data: url={}, status_code={:?}",
+                    url,
+                    response.status_code
+                );
                 Err(error)
             }
         }
@@ -309,7 +318,12 @@ impl StatsigHttpSpecsAdapter {
         current_specs_info: SpecsInfo,
         trigger: SpecsSyncTrigger,
     ) -> Result<(), StatsigErr> {
-        log_d!(TAG, "Starting manual sync: trigger={:?}, lcut={:?}", trigger, current_specs_info.lcut);
+        log_i!(
+            TAG,
+            "Starting manual sync: trigger={:?}, lcut={:?}",
+            trigger,
+            current_specs_info.lcut
+        );
 
         if let Some(lock) = self
             .listener
@@ -328,7 +342,7 @@ impl StatsigHttpSpecsAdapter {
         let result = self.process_spec_data(response).await;
 
         if result.is_err() && self.fallback_url.is_some() {
-            log_d!(TAG, "Primary request failed, falling back to statsig api");
+            log_i!(TAG, "Primary request failed, falling back to statsig api");
             let response = self
                 .handle_fallback_request(self.get_request_args(&current_specs_info, trigger))
                 .await;
@@ -336,9 +350,18 @@ impl StatsigHttpSpecsAdapter {
         }
 
         if result.is_ok() {
-            log_d!(TAG, "Manual sync completed successfully: trigger={:?}", trigger);
+            log_i!(
+                TAG,
+                "Manual sync completed successfully: trigger={:?}",
+                trigger
+            );
         } else {
-            log_e!(TAG, "Manual sync failed: trigger={:?}, error={:?}", trigger, result);
+            log_e!(
+                TAG,
+                "Manual sync failed: trigger={:?}, error={:?}",
+                trigger,
+                result
+            );
         }
 
         result
@@ -357,7 +380,7 @@ impl StatsigHttpSpecsAdapter {
             StatsigErr::NetworkError(e)
         })?;
 
-        log_d!(
+        log_i!(
             TAG,
             "Processing spec data: api={}, received_at={}",
             resp.api,
@@ -386,12 +409,12 @@ impl StatsigHttpSpecsAdapter {
         {
             Some(lock) => match lock.as_ref() {
                 Some(listener) => {
-                    log_d!(TAG, "Notifying listener of specs update");
+                    log_i!(TAG, "Notifying listener of specs update");
                     let result = listener.did_receive_specs_update(update);
                     if let Err(ref e) = result {
                         log_e!(TAG, "Listener failed to process specs update: error={}", e);
                     } else {
-                        log_d!(TAG, "Listener successfully processed specs update");
+                        log_i!(TAG, "Listener successfully processed specs update");
                     }
                     result
                 }
@@ -475,11 +498,11 @@ impl SpecsAdapter for StatsigHttpSpecsAdapter {
                         }
                     }
                     () = rt_shutdown_notify.notified() => {
-                        log_d!(TAG, "Runtime shutdown. Shutting down specs background sync");
+                        log_i!(TAG, "Runtime shutdown. Shutting down specs background sync");
                         break;
                     },
                     () = shutdown_notify.notified() => {
-                        log_d!(TAG, "Shutting down specs background sync");
+                        log_i!(TAG, "Shutting down specs background sync");
                         break;
                     }
                 }
