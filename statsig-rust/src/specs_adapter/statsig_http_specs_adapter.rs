@@ -282,27 +282,34 @@ impl StatsigHttpSpecsAdapter {
                 .join(", ")
         }).unwrap_or_else(|| "no headers".to_string());
 
+        // Helper function for case-insensitive header lookup
+        let get_header = |headers: &HashMap<String, String>, name: &str| -> Option<String> {
+            headers.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.clone())
+        };
+
         let content_length = response.headers.as_ref()
-            .and_then(|h| h.get("content-length").or_else(|| h.get("Content-Length")))
-            .map(|v| v.as_str())
-            .unwrap_or("unknown");
+            .and_then(|h| get_header(h, "content-length"))
+            .unwrap_or_else(|| "not present".to_string());
 
         let content_type = response.headers.as_ref()
-            .and_then(|h| h.get("content-type").or_else(|| h.get("Content-Type")))
-            .map(|v| v.as_str())
-            .unwrap_or("unknown");
+            .and_then(|h| get_header(h, "content-type"))
+            .unwrap_or_else(|| "not present".to_string());
 
         let content_encoding = response.headers.as_ref()
-            .and_then(|h| h.get("content-encoding").or_else(|| h.get("Content-Encoding")))
-            .map(|v| v.as_str())
-            .unwrap_or("none");
+            .and_then(|h| get_header(h, "content-encoding"))
+            .unwrap_or_else(|| "not present".to_string());
+
+        let num_headers = response.headers.as_ref().map(|h| h.len()).unwrap_or(0);
 
         log_i!(
             TAG,
-            "Received response: url={}, status_code={:?}, has_data={}, content_length={}, content_type={}, content_encoding={}, headers=[{}]",
+            "Received response: url={}, status_code={:?}, has_data={}, num_headers={}, content_length={}, content_type={}, content_encoding={}, headers=[{}]",
             url,
             response.status_code,
             response.data.is_some(),
+            num_headers,
             content_length,
             content_type,
             content_encoding,
