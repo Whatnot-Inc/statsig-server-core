@@ -243,29 +243,102 @@ impl StatsigHttpSpecsAdapter {
     ) -> Result<ResponseData, NetworkError> {
         let url = request_args.url.clone();
 
-        log_i!(TAG, "Making GET request to: {}", url);
+        // Log request details
+        let request_headers_str = request_args.headers.as_ref().map(|h| {
+            h.iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }).unwrap_or_else(|| "no headers".to_string());
+
+        let query_params_str = request_args.query_params.as_ref().map(|q| {
+            q.iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join("&")
+        }).unwrap_or_else(|| "no params".to_string());
+
+        let accept_gzip = request_args.accept_gzip_response;
+
+        log_i!(
+            TAG,
+            "Making GET request: url={}, query_params=[{}], accept_gzip={}, request_headers=[{}]",
+            url,
+            query_params_str,
+            accept_gzip,
+            request_headers_str
+        );
 
         let response = self.network.get(request_args).await.map_err(|e| {
             log_e!(TAG, "Network GET request failed: url={}, error={}", url, e);
             e
         })?;
 
+        // Log response headers for debugging
+        let headers_str = response.headers.as_ref().map(|h| {
+            h.iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }).unwrap_or_else(|| "no headers".to_string());
+
+        let content_length = response.headers.as_ref()
+            .and_then(|h| h.get("content-length").or_else(|| h.get("Content-Length")))
+            .map(|v| v.as_str())
+            .unwrap_or("unknown");
+
+        let content_type = response.headers.as_ref()
+            .and_then(|h| h.get("content-type").or_else(|| h.get("Content-Type")))
+            .map(|v| v.as_str())
+            .unwrap_or("unknown");
+
+        let content_encoding = response.headers.as_ref()
+            .and_then(|h| h.get("content-encoding").or_else(|| h.get("Content-Encoding")))
+            .map(|v| v.as_str())
+            .unwrap_or("none");
+
         log_i!(
             TAG,
-            "Received response: url={}, status_code={:?}, has_data={}",
+            "Received response: url={}, status_code={:?}, has_data={}, content_length={}, content_type={}, content_encoding={}, headers=[{}]",
             url,
             response.status_code,
-            response.data.is_some()
+            response.data.is_some(),
+            content_length,
+            content_type,
+            content_encoding,
+            headers_str
         );
 
         match response.data {
-            Some(data) => {
-                log_i!(
-                    TAG,
-                    "Successfully extracted data from response: url={}",
-                    url
-                );
-                Ok(data)
+            Some(mut data) => {
+                // Try to peek at the data to see if it's actually empty
+                match data.read_to_string() {
+                    Ok(content) => {
+                        let content_preview = if content.len() > 100 {
+                            format!("{}... ({} bytes total)", &content[..100], content.len())
+                        } else {
+                            format!("{} ({} bytes)", content, content.len())
+                        };
+                        log_i!(
+                            TAG,
+                            "Successfully extracted data from response: url={}, data_preview={}",
+                            url,
+                            content_preview
+                        );
+                        // Return the data back as ResponseData
+                        Ok(ResponseData::from_bytes(content.into_bytes()))
+                    }
+                    Err(e) => {
+                        log_e!(
+                            TAG,
+                            "Failed to read response data as string: url={}, error={}",
+                            url,
+                            e
+                        );
+                        // Still return the data even if we couldn't read it for logging
+                        Ok(data)
+                    }
+                }
             }
             None => {
                 let error = NetworkError::RequestFailed(
@@ -275,9 +348,10 @@ impl StatsigHttpSpecsAdapter {
                 );
                 log_e!(
                     TAG,
-                    "Response missing data: url={}, status_code={:?}",
+                    "Response missing data: url={}, status_code={:?}, headers=[{}]",
                     url,
-                    response.status_code
+                    response.status_code,
+                    headers_str
                 );
                 Err(error)
             }
