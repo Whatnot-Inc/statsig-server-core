@@ -109,12 +109,30 @@ impl StatsigHttpSpecsAdapter {
     ) -> Result<NetworkResponse, NetworkError> {
         let request_args = self.get_request_args(&current_specs_info, trigger);
         let url = request_args.url.clone();
+
+        log_d!(
+            TAG,
+            "Fetching specs from network: url={}, trigger={:?}, lcut={:?}, checksum={:?}, retries={}, timeout_ms={}",
+            url,
+            trigger,
+            current_specs_info.lcut,
+            current_specs_info.checksum,
+            request_args.retries,
+            request_args.timeout_ms
+        );
+
         match self.handle_specs_request(request_args).await {
-            Ok(response) => Ok(NetworkResponse {
-                data: response,
-                api: get_api_from_url(&url),
-            }),
-            Err(e) => Err(e),
+            Ok(response) => {
+                log_d!(TAG, "Successfully fetched specs from network: url={}", url);
+                Ok(NetworkResponse {
+                    data: response,
+                    api: get_api_from_url(&url),
+                })
+            }
+            Err(e) => {
+                log_e!(TAG, "Failed to fetch specs from network: url={}, error={}", url, e);
+                Err(e)
+            }
         }
     }
 
@@ -163,26 +181,55 @@ impl StatsigHttpSpecsAdapter {
         &self,
         mut request_args: RequestArgs,
     ) -> Result<NetworkResponse, NetworkError> {
+        let original_url = request_args.url.clone();
+
         let fallback_url = match &self.fallback_url {
             Some(url) => construct_specs_url(url.as_str(), &self.sdk_key),
             None => {
+                log_e!(
+                    TAG,
+                    "No fallback URL configured: original_url={}",
+                    original_url
+                );
                 return Err(NetworkError::RequestFailed(
                     request_args.url.clone(),
                     None,
                     "No fallback URL".to_string(),
-                ))
+                ));
             }
         };
 
+        log_d!(
+            TAG,
+            "Attempting fallback request: original_url={}, fallback_url={}",
+            original_url,
+            fallback_url
+        );
+
         request_args.url = fallback_url.clone();
 
-        // TODO logging
-
-        let response = self.handle_specs_request(request_args).await?;
-        Ok(NetworkResponse {
-            data: response,
-            api: get_api_from_url(&fallback_url),
-        })
+        match self.handle_specs_request(request_args).await {
+            Ok(response) => {
+                log_d!(
+                    TAG,
+                    "Fallback request succeeded: fallback_url={}",
+                    fallback_url
+                );
+                Ok(NetworkResponse {
+                    data: response,
+                    api: get_api_from_url(&fallback_url),
+                })
+            }
+            Err(e) => {
+                log_e!(
+                    TAG,
+                    "Fallback request failed: fallback_url={}, error={}",
+                    fallback_url,
+                    e
+                );
+                Err(e)
+            }
+        }
     }
 
     async fn handle_specs_request(
@@ -190,14 +237,41 @@ impl StatsigHttpSpecsAdapter {
         request_args: RequestArgs,
     ) -> Result<ResponseData, NetworkError> {
         let url = request_args.url.clone();
-        let response = self.network.get(request_args).await?;
-        match response.data {
-            Some(data) => Ok(data),
-            None => Err(NetworkError::RequestFailed(
+
+        log_d!(TAG, "Making GET request to: {}", url);
+
+        let response = self.network.get(request_args).await.map_err(|e| {
+            log_e!(
+                TAG,
+                "Network GET request failed: url={}, error={}",
                 url,
-                None,
-                "No data in response".to_string(),
-            )),
+                e
+            );
+            e
+        })?;
+
+        log_d!(
+            TAG,
+            "Received response: url={}, status_code={:?}, has_data={}",
+            url,
+            response.status_code,
+            response.data.is_some()
+        );
+
+        match response.data {
+            Some(data) => {
+                log_d!(TAG, "Successfully extracted data from response: url={}", url);
+                Ok(data)
+            }
+            None => {
+                let error = NetworkError::RequestFailed(
+                    url.clone(),
+                    response.status_code,
+                    "No data in response".to_string(),
+                );
+                log_e!(TAG, "Response missing data: url={}, status_code={:?}", url, response.status_code);
+                Err(error)
+            }
         }
     }
 
@@ -235,12 +309,16 @@ impl StatsigHttpSpecsAdapter {
         current_specs_info: SpecsInfo,
         trigger: SpecsSyncTrigger,
     ) -> Result<(), StatsigErr> {
+        log_d!(TAG, "Starting manual sync: trigger={:?}, lcut={:?}", trigger, current_specs_info.lcut);
+
         if let Some(lock) = self
             .listener
             .try_read_for(std::time::Duration::from_secs(5))
         {
             if lock.is_none() {
-                return Err(StatsigErr::UnstartedAdapter("Listener not set".to_string()));
+                let err = StatsigErr::UnstartedAdapter("Listener not set".to_string());
+                log_e!(TAG, "Cannot sync specs: {}", err);
+                return Err(err);
             }
         }
 
@@ -250,11 +328,17 @@ impl StatsigHttpSpecsAdapter {
         let result = self.process_spec_data(response).await;
 
         if result.is_err() && self.fallback_url.is_some() {
-            log_d!(TAG, "Falling back to statsig api");
+            log_d!(TAG, "Primary request failed, falling back to statsig api");
             let response = self
                 .handle_fallback_request(self.get_request_args(&current_specs_info, trigger))
                 .await;
             return self.process_spec_data(response).await;
+        }
+
+        if result.is_ok() {
+            log_d!(TAG, "Manual sync completed successfully: trigger={:?}", trigger);
+        } else {
+            log_e!(TAG, "Manual sync failed: trigger={:?}, error={:?}", trigger, result);
         }
 
         result
@@ -264,7 +348,21 @@ impl StatsigHttpSpecsAdapter {
         &self,
         response: Result<NetworkResponse, NetworkError>,
     ) -> Result<(), StatsigErr> {
-        let resp = response.map_err(StatsigErr::NetworkError)?;
+        let resp = response.map_err(|e| {
+            log_e!(
+                TAG,
+                "Failed to process spec data due to network error: error={}",
+                e
+            );
+            StatsigErr::NetworkError(e)
+        })?;
+
+        log_d!(
+            TAG,
+            "Processing spec data: api={}, received_at={}",
+            resp.api,
+            Utc::now().timestamp_millis()
+        );
 
         let update = SpecsUpdate {
             data: resp.data,
@@ -287,8 +385,21 @@ impl StatsigHttpSpecsAdapter {
             .try_read_for(std::time::Duration::from_secs(5))
         {
             Some(lock) => match lock.as_ref() {
-                Some(listener) => listener.did_receive_specs_update(update),
-                None => Err(StatsigErr::UnstartedAdapter("Listener not set".to_string())),
+                Some(listener) => {
+                    log_d!(TAG, "Notifying listener of specs update");
+                    let result = listener.did_receive_specs_update(update);
+                    if let Err(ref e) = result {
+                        log_e!(TAG, "Listener failed to process specs update: error={}", e);
+                    } else {
+                        log_d!(TAG, "Listener successfully processed specs update");
+                    }
+                    result
+                }
+                None => {
+                    let err = StatsigErr::UnstartedAdapter("Listener not set".to_string());
+                    log_e!(TAG, "Cannot process specs: {}", err);
+                    Err(err)
+                }
             },
             None => {
                 let err =
