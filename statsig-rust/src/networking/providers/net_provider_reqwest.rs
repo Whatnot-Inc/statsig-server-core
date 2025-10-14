@@ -5,7 +5,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::{
-    log_e, log_w,
+    log_d, log_e, log_i, log_w,
     networking::{
         http_types::{HttpMethod, RequestArgs, Response, ResponseData},
         NetworkProvider,
@@ -44,17 +44,34 @@ impl NetworkProvider for NetworkProviderReqwest {
         match request.send().await {
             Ok(response) => {
                 status_code = Some(response.status().as_u16());
+                let content_length = response.content_length();
+                let version = response.version();
                 headers = get_response_headers(&response);
 
+                log_i!(
+                    TAG,
+                    "Response received: status={:?}, http_version={:?}, content_length={:?}, headers_count={}",
+                    status_code,
+                    version,
+                    content_length,
+                    headers.as_ref().map(|h| h.len()).unwrap_or(0)
+                );
+
                 match Self::write_response_to_temp_file(response).await {
-                    Ok(response_data) => data = Some(response_data),
+                    Ok(response_data) => {
+                        log_i!(TAG, "Successfully wrote response body to temp file");
+                        data = Some(response_data);
+                    }
                     Err(e) => {
-                        error = Some(e.to_string());
+                        let err_msg = format!("Failed to write response body: {}", e);
+                        log_e!(TAG, "{}", err_msg);
+                        error = Some(err_msg);
                     }
                 }
             }
             Err(e) => {
                 let error_message = get_error_message(e);
+                log_e!(TAG, "Request send failed: {}", error_message);
                 error = Some(error_message);
             }
         }
@@ -171,21 +188,66 @@ impl NetworkProviderReqwest {
     ) -> Result<ResponseData, StatsigErr> {
         let mut response = response;
         let mut temp_file = tempfile::spooled_tempfile(1024 * 1024 * 2); // 2MB
+        let mut total_bytes = 0usize;
+        let mut chunk_count = 0usize;
 
-        while let Some(item) = response
-            .chunk()
-            .await
-            .map_err(|e| StatsigErr::FileError(e.to_string()))?
-        {
-            temp_file
-                .write_all(&item)
-                .map_err(|e| StatsigErr::FileError(e.to_string()))?;
+        log_d!(TAG, "Starting to read response body chunks");
+
+        loop {
+            log_d!(TAG, "Awaiting next chunk... (chunks read so far: {})", chunk_count);
+
+            match response.chunk().await {
+                Ok(Some(item)) => {
+                    let chunk_size = item.len();
+                    total_bytes += chunk_size;
+                    chunk_count += 1;
+
+                    log_d!(
+                        TAG,
+                        "Received chunk #{}: {} bytes (total: {} bytes)",
+                        chunk_count,
+                        chunk_size,
+                        total_bytes
+                    );
+
+                    temp_file.write_all(&item).map_err(|e| {
+                        let err = format!("Failed to write chunk to temp file: {}", e);
+                        log_e!(TAG, "{}", err);
+                        StatsigErr::FileError(err)
+                    })?;
+                }
+                Ok(None) => {
+                    log_i!(
+                        TAG,
+                        "Finished reading response body: {} chunks, {} total bytes",
+                        chunk_count,
+                        total_bytes
+                    );
+                    break;
+                }
+                Err(e) => {
+                    let err = format!(
+                        "Error reading chunk (after {} chunks, {} bytes): {}",
+                        chunk_count, total_bytes, e
+                    );
+                    log_e!(TAG, "{}", err);
+                    return Err(StatsigErr::FileError(err));
+                }
+            }
         }
 
-        temp_file
-            .seek(SeekFrom::Start(0))
-            .map_err(|e| StatsigErr::FileError(e.to_string()))?;
+        if total_bytes == 0 {
+            log_w!(TAG, "WARNING: Response body was empty (0 bytes read)");
+        }
 
+        log_d!(TAG, "Seeking temp file back to start");
+        temp_file.seek(SeekFrom::Start(0)).map_err(|e| {
+            let err = format!("Failed to seek temp file: {}", e);
+            log_e!(TAG, "{}", err);
+            StatsigErr::FileError(err)
+        })?;
+
+        log_d!(TAG, "Creating BufReader from temp file");
         let reader = BufReader::new(temp_file);
         Ok(ResponseData::from_stream(Box::new(reader)))
     }
