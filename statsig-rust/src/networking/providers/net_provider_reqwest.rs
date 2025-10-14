@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::{BufReader, Seek, SeekFrom, Write};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -10,7 +9,6 @@ use crate::{
         http_types::{HttpMethod, RequestArgs, Response, ResponseData},
         NetworkProvider,
     },
-    StatsigErr,
 };
 
 use crate::networking::proxy_config::ProxyConfig;
@@ -46,8 +44,8 @@ impl NetworkProvider for NetworkProviderReqwest {
                 status_code = Some(response.status().as_u16());
                 headers = get_response_headers(&response);
 
-                match Self::write_response_to_temp_file(response).await {
-                    Ok(response_data) => data = Some(response_data),
+                match response.bytes().await {
+                    Ok(bytes) => data = Some(ResponseData::from_bytes(bytes.to_vec())),
                     Err(e) => {
                         error = Some(e.to_string());
                     }
@@ -157,30 +155,6 @@ impl NetworkProviderReqwest {
         };
 
         client_builder.proxy(proxy.basic_auth(username, password))
-    }
-
-    async fn write_response_to_temp_file(
-        response: reqwest::Response,
-    ) -> Result<ResponseData, StatsigErr> {
-        let mut response = response;
-        let mut temp_file = tempfile::spooled_tempfile(1024 * 1024 * 2); // 2MB
-
-        while let Some(item) = response
-            .chunk()
-            .await
-            .map_err(|e| StatsigErr::FileError(e.to_string()))?
-        {
-            temp_file
-                .write_all(&item)
-                .map_err(|e| StatsigErr::FileError(e.to_string()))?;
-        }
-
-        temp_file
-            .seek(SeekFrom::Start(0))
-            .map_err(|e| StatsigErr::FileError(e.to_string()))?;
-
-        let reader = BufReader::new(temp_file);
-        Ok(ResponseData::from_stream(Box::new(reader)))
     }
 }
 
